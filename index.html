@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="he" dir="rtl">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>מחולל וידאו (KIE)</title>
+  <style>
+    body{font-family:Arial, sans-serif;max-width:920px;margin:24px auto;padding:0 12px}
+    textarea{width:100%;height:140px}
+    select,input,button{padding:10px;font-size:16px}
+    .row{display:flex;gap:12px;flex-wrap:wrap;margin:12px 0;align-items:center}
+    .card{border:1px solid #ddd;padding:12px;border-radius:12px;margin-top:16px}
+    .muted{color:#666}
+    .ok{color:#0a7}
+    .bad{color:#c00}
+    code{background:#f6f6f6;padding:2px 6px;border-radius:6px}
+    a{word-break:break-all}
+  </style>
+</head>
+<body>
+  <h2>מחולל וידאו דרך KIE</h2>
+  <p class="muted">פרומפט → יצירת משימה → בדיקת סטטוס → וידאו.</p>
+
+  <label><b>הפרומפט שלך:</b></label>
+  <textarea id="prompt" placeholder="תאר/י את הסצנה..."></textarea>
+
+  <div class="row">
+    <label>יחס:
+      <select id="ratio">
+        <option value="9:16">9:16 (רילס/טיקטוק)</option>
+        <option value="1:1">1:1</option>
+        <option value="16:9">16:9</option>
+      </select>
+    </label>
+
+    <label>משך:
+      <input id="duration" type="number" min="5" max="10" value="5" /> שנ׳
+    </label>
+
+    <label>סאונד:
+      <select id="sound">
+        <option value="false" selected>לא</option>
+        <option value="true">כן</option>
+      </select>
+    </label>
+
+    <button id="go">צור וידאו</button>
+  </div>
+
+  <div class="card" id="status" style="display:none;"></div>
+  <div class="card" id="result" style="display:none;"></div>
+
+<script>
+  // ✅ הדבק כאן את כתובת ה-Render שלך:
+  // לדוגמה: https://kie-backend-xxxx.onrender.com
+  const BACKEND_URL = "https://kie-backend.onrender.com";
+
+  const $ = (id) => document.getElementById(id);
+  const setStatus = (html) => { $("status").style.display="block"; $("status").innerHTML=html; };
+  const setResult = (html) => { $("result").style.display="block"; $("result").innerHTML=html; };
+  const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+  function backendReady() {
+    return BACKEND_URL && BACKEND_URL.startsWith("https://") && !BACKEND_URL.includes("PASTE_YOUR_RENDER_URL_HERE");
+  }
+
+  async function safeJsonFetch(url, options) {
+    try {
+      const r = await fetch(url, options);
+      const text = await r.text();
+      let data;
+      try { data = JSON.parse(text); } catch { data = { raw: text }; }
+      return { ok: r.ok, status: r.status, data };
+    } catch (e) {
+      return { ok: false, status: 0, data: { error: String(e) } };
+    }
+  }
+
+  $("go").onclick = async () => {
+    $("result").style.display = "none";
+
+    if (!backendReady()) {
+      setStatus(`<span class="bad">חסר BACKEND_URL</span><br>
+        פתח את הקובץ והדבק את כתובת Render בשורה: <code>const BACKEND_URL = "..."</code>`);
+      return;
+    }
+
+    const prompt = $("prompt").value.trim();
+    if (!prompt) {
+      setStatus("<span class='bad'>חובה למלא פרומפט.</span>");
+      return;
+    }
+
+    setStatus("שולח בקשה לשרת...");
+
+    const body = {
+      prompt,
+      aspect_ratio: $("ratio").value,
+      duration: $("duration").value,
+      sound: $("sound").value === "true",
+    };
+
+    // Create task
+    const create = await safeJsonFetch(`${BACKEND_URL}/create-video`, {
+      method: "POST",
+      headers: {"Content-Type":"application/json"},
+      body: JSON.stringify(body)
+    });
+
+    if (!create.ok) {
+      setStatus(`<span class="bad">שגיאה ביצירת משימה</span> (HTTP ${create.status})
+        <pre>${JSON.stringify(create.data, null, 2)}</pre>`);
+      return;
+    }
+
+    const taskId = create.data?.taskId;
+    if (!taskId) {
+      setStatus(`<span class="bad">לא התקבל taskId</span>
+        <pre>${JSON.stringify(create.data, null, 2)}</pre>`);
+      return;
+    }
+
+    setStatus(`<span class="ok">נוצר taskId:</span> <b>${taskId}</b><br>בודק סטטוס כל 3 שניות...`);
+
+    // Poll status
+    for (let i = 0; i < 140; i++) { // ~7 דקות
+      const st = await safeJsonFetch(`${BACKEND_URL}/task/${encodeURIComponent(taskId)}`);
+
+      if (!st.ok) {
+        setStatus(`<span class="bad">שגיאה בסטטוס</span> (HTTP ${st.status})
+          <pre>${JSON.stringify(st.data, null, 2)}</pre>`);
+        return;
+      }
+
+      const state = st.data?.state || "unknown";
+      setStatus(`משימה: <b>${taskId}</b><br>סטטוס: <b>${state}</b>`);
+
+      if (state === "success" && Array.isArray(st.data?.resultUrls) && st.data.resultUrls.length) {
+        const url = st.data.resultUrls[0];
+        setResult(`✅ <b>מוכן!</b><br>
+          <a href="${url}" target="_blank" rel="noopener">פתח וידאו</a><br><br>
+          <video controls style="width:100%; max-height:520px;" src="${url}"></video>`);
+        return;
+      }
+
+      if (state === "failed") {
+        setResult(`❌ <b>נכשל:</b> ${st.data?.failMsg || "לא ידוע"}`);
+        return;
+      }
+
+      await sleep(3000);
+    }
+
+    setResult(`⌛ לקח יותר מדי זמן. שמור את ה-taskId: <b>${taskId}</b> ונסה שוב מאוחר יותר.`);
+  };
+</script>
+</body>
+</html>
+
